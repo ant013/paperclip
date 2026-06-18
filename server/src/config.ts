@@ -85,6 +85,15 @@ export interface Config {
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  /**
+   * Gates the issue-generating agent auto-recovery reconcilers (stranded-issue
+   * recovery, silent-active-run review, productivity review, issue-graph
+   * escalations). Disabled by default in this fork — they generate review/
+   * recovery issues that pile up without fixing anything. The mechanical
+   * scheduler (timers, routines, queue resumption, stale-lock sweep) is
+   * unaffected. Set PAPERCLIP_AGENT_AUTO_RECOVERY=true to restore them.
+   */
+  agentAutoRecoveryEnabled: boolean;
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
 }
@@ -331,6 +340,8 @@ export function loadConfig(): Config {
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    // Default OFF in this fork: opt back in with PAPERCLIP_AGENT_AUTO_RECOVERY=true.
+    agentAutoRecoveryEnabled: process.env.PAPERCLIP_AGENT_AUTO_RECOVERY === "true",
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
   };

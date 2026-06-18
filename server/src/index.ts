@@ -779,32 +779,38 @@ export async function startServer(): Promise<StartedServer> {
 
       const promotion = await heartbeat.promoteDueScheduledRetries();
       await heartbeat.resumeQueuedRuns();
-      const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-      if (
-        promotion.promoted > 0 ||
-        reconciled.assignmentDispatched > 0 ||
-        reconciled.dispatchRequeued > 0 ||
-        reconciled.continuationRequeued > 0 ||
-        reconciled.successfulRunHandoffEscalated > 0 ||
-        reconciled.escalated > 0
-      ) {
-        logger.warn(
-          { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-          "startup heartbeat recovery changed assigned issue state",
-        );
-      }
+      // Issue-generating auto-recovery reconcilers are gated by
+      // config.agentAutoRecoveryEnabled (default off in this fork). The
+      // mechanical recovery above (reap/promote/resume) and the stale-lock
+      // sweeper below always run.
+      if (config.agentAutoRecoveryEnabled) {
+        const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
+        if (
+          promotion.promoted > 0 ||
+          reconciled.assignmentDispatched > 0 ||
+          reconciled.dispatchRequeued > 0 ||
+          reconciled.continuationRequeued > 0 ||
+          reconciled.successfulRunHandoffEscalated > 0 ||
+          reconciled.escalated > 0
+        ) {
+          logger.warn(
+            { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
+            "startup heartbeat recovery changed assigned issue state",
+          );
+        }
 
-      const issueGraphReconciled = await heartbeat.reconcileIssueGraphLiveness();
-      if (issueGraphReconciled.escalationsCreated > 0) {
-        logger.warn(
-          { ...issueGraphReconciled },
-          "startup issue-graph liveness reconciliation created escalations",
-        );
-      }
+        const issueGraphReconciled = await heartbeat.reconcileIssueGraphLiveness();
+        if (issueGraphReconciled.escalationsCreated > 0) {
+          logger.warn(
+            { ...issueGraphReconciled },
+            "startup issue-graph liveness reconciliation created escalations",
+          );
+        }
 
-      const scanned = await heartbeat.scanSilentActiveRuns();
-      if (scanned.created > 0 || scanned.escalated > 0) {
-        logger.warn({ ...scanned }, "startup active-run output watchdog created review work");
+        const scanned = await heartbeat.scanSilentActiveRuns();
+        if (scanned.created > 0 || scanned.escalated > 0) {
+          logger.warn({ ...scanned }, "startup active-run output watchdog created review work");
+        }
       }
 
       const swept = await heartbeat.sweepStaleIssueLocks();
@@ -812,9 +818,11 @@ export async function startServer(): Promise<StartedServer> {
         logger.warn({ ...swept }, "startup stale-lock sweeper cleared issue locks");
       }
 
-      const reviewed = await heartbeat.reconcileProductivityReviews();
-      if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
-        logger.warn({ ...reviewed }, "startup productivity reconciliation created or updated review work");
+      if (config.agentAutoRecoveryEnabled) {
+        const reviewed = await heartbeat.reconcileProductivityReviews();
+        if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
+          logger.warn({ ...reviewed }, "startup productivity reconciliation created or updated review work");
+        }
       }
     })().catch((err) => {
       logger.error({ err }, "startup heartbeat recovery failed");
@@ -850,28 +858,34 @@ export async function startServer(): Promise<StartedServer> {
         .then(() => heartbeat.promoteDueScheduledRetries())
         .then(async (promotion) => {
           await heartbeat.resumeQueuedRuns();
-          const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-          if (
-            promotion.promoted > 0 ||
-            reconciled.assignmentDispatched > 0 ||
-            reconciled.dispatchRequeued > 0 ||
-            reconciled.continuationRequeued > 0 ||
-            reconciled.successfulRunHandoffEscalated > 0 ||
-            reconciled.escalated > 0
-          ) {
-            logger.warn(
-              { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-              "periodic heartbeat recovery changed assigned issue state",
-            );
+          // Issue-generating auto-recovery is gated (default off in this fork);
+          // resumeQueuedRuns above always runs.
+          if (config.agentAutoRecoveryEnabled) {
+            const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
+            if (
+              promotion.promoted > 0 ||
+              reconciled.assignmentDispatched > 0 ||
+              reconciled.dispatchRequeued > 0 ||
+              reconciled.continuationRequeued > 0 ||
+              reconciled.successfulRunHandoffEscalated > 0 ||
+              reconciled.escalated > 0
+            ) {
+              logger.warn(
+                { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
+                "periodic heartbeat recovery changed assigned issue state",
+              );
+            }
           }
         })
         .then(async () => {
+          if (!config.agentAutoRecoveryEnabled) return;
           const reconciled = await heartbeat.reconcileIssueGraphLiveness();
           if (reconciled.escalationsCreated > 0) {
             logger.warn({ ...reconciled }, "periodic issue-graph liveness reconciliation created escalations");
           }
         })
         .then(async () => {
+          if (!config.agentAutoRecoveryEnabled) return;
           const scanned = await heartbeat.scanSilentActiveRuns();
           if (scanned.created > 0 || scanned.escalated > 0) {
             logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
@@ -884,6 +898,7 @@ export async function startServer(): Promise<StartedServer> {
           }
         })
         .then(async () => {
+          if (!config.agentAutoRecoveryEnabled) return;
           const reviewed = await heartbeat.reconcileProductivityReviews();
           if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
             logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
@@ -966,6 +981,7 @@ export async function startServer(): Promise<StartedServer> {
         migrationSummary,
         heartbeatSchedulerEnabled: config.heartbeatSchedulerEnabled,
         heartbeatSchedulerIntervalMs: config.heartbeatSchedulerIntervalMs,
+        agentAutoRecoveryEnabled: config.agentAutoRecoveryEnabled,
         databaseBackupEnabled: config.databaseBackupEnabled,
         databaseBackupIntervalMinutes: config.databaseBackupIntervalMinutes,
         databaseBackupRetentionDays: config.databaseBackupRetentionDays,
