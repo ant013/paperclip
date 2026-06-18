@@ -39,9 +39,8 @@ import {
   isUuidSecretRef,
   readConfigValueAtPath,
 } from "./json-schema-secret-refs.js";
-
-export const PLUGIN_SECRET_REFS_DISABLED_MESSAGE =
-  "Plugin secret references are disabled until company-scoped plugin config lands";
+import { pluginRegistryService } from "./plugin-registry.js";
+import { secretService } from "./secrets.js";
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -50,6 +49,14 @@ export const PLUGIN_SECRET_REFS_DISABLED_MESSAGE =
 function invalidSecretRef(secretRef: string): Error {
   const err = new Error(`Invalid secret reference: ${secretRef}`);
   err.name = "InvalidSecretRefError";
+  return err;
+}
+
+function secretNotFound(secretRef: string): Error {
+  // Generic message: never reveal whether a given secret actually exists, so a
+  // plugin cannot use the resolve path to probe which secret UUIDs are valid.
+  const err = new Error(`Secret not found: ${secretRef}`);
+  err.name = "SecretNotFoundError";
   return err;
 }
 
@@ -199,10 +206,19 @@ function createRateLimiter(maxAttempts: number, windowMs: number) {
 export function createPluginSecretsHandler(
   options: PluginSecretsHandlerOptions,
 ): PluginSecretsService {
-  const { pluginId } = options;
+  const { db, pluginId } = options;
+  const registry = pluginRegistryService(db);
+  const secrets = secretService(db);
 
   // Rate limit: max 30 resolution attempts per plugin per minute
   const rateLimiter = createRateLimiter(30, 60_000);
+
+  // A plugin may resolve ONLY the secret references that appear in its own
+  // validated instance config — that config is the operator's explicit grant.
+  // Cache the allow-list briefly to avoid a DB round-trip on every resolve.
+  let cachedAllowedRefs: Set<string> | null = null;
+  let cachedAllowedRefsExpiry = 0;
+  const CONFIG_CACHE_TTL_MS = 30_000; // matches the plugin event-bus config TTL
 
   return {
     async resolve(params: PluginSecretsResolveParams): Promise<string> {
@@ -230,9 +246,42 @@ export function createPluginSecretsHandler(
         throw invalidSecretRef(trimmedRef);
       }
 
-      // Fail closed until plugin config and worker runtime both carry an
-      // explicit company scope for secret bindings and resolution.
-      throw new Error(PLUGIN_SECRET_REFS_DISABLED_MESSAGE);
+      // ---------------------------------------------------------------
+      // 2. Config scope — only refs declared in this plugin's own config may
+      //    be resolved. This is the plugin's authorisation boundary, now that
+      //    company-scoped plugin tables have landed (company_id FK, #5865).
+      // ---------------------------------------------------------------
+      const now = Date.now();
+      if (!cachedAllowedRefs || now > cachedAllowedRefsExpiry) {
+        const [configRow, plugin] = await Promise.all([
+          registry.getConfig(pluginId),
+          registry.getById(pluginId),
+        ]);
+        const schema = (plugin?.manifestJson as unknown as Record<string, unknown> | null)
+          ?.instanceConfigSchema as Record<string, unknown> | undefined;
+        cachedAllowedRefs = extractSecretRefsFromConfig(configRow?.configJson, schema);
+        cachedAllowedRefsExpiry = now + CONFIG_CACHE_TTL_MS;
+      }
+
+      if (!cachedAllowedRefs.has(trimmedRef)) {
+        // Return "not found" rather than "forbidden" so the plugin cannot use
+        // this path to probe which secret UUIDs exist.
+        throw secretNotFound(trimmedRef);
+      }
+
+      // ---------------------------------------------------------------
+      // 3. Resolve through the maintained secret service. The ref is the
+      //    globally-unique company_secrets id; resolveSecretValue enforces
+      //    company scope, checks version status, and performs provider/vault
+      //    decryption (rotation-aware). No binding context is supplied — the
+      //    config-scope check above is the plugin's authorisation boundary.
+      // ---------------------------------------------------------------
+      const secret = await secrets.getById(trimmedRef);
+      if (!secret) {
+        throw secretNotFound(trimmedRef);
+      }
+
+      return secrets.resolveSecretValue(secret.companyId, trimmedRef, "latest");
     },
   };
 }
