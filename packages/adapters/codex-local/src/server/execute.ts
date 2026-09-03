@@ -333,6 +333,32 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
       : null;
+  const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
+  const requireInstructionsFile = config.requireInstructionsFile === true;
+  let instructionsContents: string | null = null;
+  if (!instructionsFilePath) {
+    if (requireInstructionsFile) {
+      throw new Error("A required Codex instructions file was not configured.");
+    }
+  } else {
+    try {
+      const instructionsStat = await fs.stat(instructionsFilePath);
+      if (!instructionsStat.isFile()) {
+        throw new Error("path is not a regular file");
+      }
+      instructionsContents = await fs.readFile(instructionsFilePath, "utf8");
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (requireInstructionsFile) {
+        throw new Error(`Required Codex instructions file "${instructionsFilePath}" could not be read.`);
+      }
+      await onLog(
+        "stdout",
+        `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
+      );
+    }
+  }
   const codexSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = resolveCodexDesiredSkillNames(config, codexSkillEntries);
   await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
@@ -570,25 +596,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[paperclip] Codex session "${runtimeSessionId}" was saved for cwd "${runtimeSessionCwd}" and will not be resumed in "${effectiveExecutionCwd}".\n`,
       );
     }
-    const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-    const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
     let instructionsPrefix = "";
     let instructionsChars = 0;
-    if (instructionsFilePath) {
-      try {
-        const instructionsContents = await fs.readFile(instructionsFilePath, "utf8");
-        instructionsPrefix =
-          `${instructionsContents}\n\n` +
-          `The above agent instructions were loaded from ${instructionsFilePath}. ` +
-          `Resolve any relative file references from ${instructionsDir}.\n\n`;
-        instructionsChars = instructionsPrefix.length;
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        await onLog(
-          "stdout",
-          `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
-        );
-      }
+    if (instructionsContents !== null) {
+      instructionsPrefix =
+        `${instructionsContents}\n\n` +
+        `The above agent instructions were loaded from ${instructionsFilePath}. ` +
+        `Resolve any relative file references from ${instructionsDir}.\n\n`;
+      instructionsChars = instructionsPrefix.length;
     }
     const repoAgentsNote =
       "Codex exec automatically applies repo-scoped AGENTS.md instructions from the current workspace; Paperclip does not currently suppress that discovery.";

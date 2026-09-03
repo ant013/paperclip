@@ -247,6 +247,177 @@ describe("codex execute", () => {
     }
   });
 
+  it.each([
+    ["an empty path", ""],
+    ["a missing path", "missing-AGENTS.md"],
+    ["a directory", "instructions-directory"],
+  ])("refuses to spawn Codex when required instructions use %s", async (_label, configuredPath) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-required-instructions-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const instructionsDirectory = path.join(root, "instructions-directory");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(instructionsDirectory, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const instructionsFilePath = configuredPath ? path.join(root, configuredPath) : "";
+      await expect(
+        execute({
+          runId: `run-required-instructions-${configuredPath || "empty"}`,
+          agent: {
+            id: "agent-1",
+            companyId: "company-1",
+            name: "Codex Coder",
+            adapterType: "codex_local",
+            adapterConfig: {},
+          },
+          runtime: {
+            sessionId: null,
+            sessionParams: null,
+            sessionDisplayId: null,
+            taskKey: null,
+          },
+          config: {
+            command: commandPath,
+            cwd: workspace,
+            instructionsFilePath,
+            requireInstructionsFile: true,
+            env: {
+              PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            },
+            promptTemplate: "Follow the paperclip heartbeat.",
+          },
+          context: {},
+          authToken: "run-jwt-token",
+          onLog: async () => {},
+        }),
+      ).rejects.toThrow(/required Codex instructions file/i);
+      await expect(fs.access(capturePath)).rejects.toThrow();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loads a readable required instructions file", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-required-instructions-ok-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const instructionsPath = path.join(root, "AGENTS.md");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.writeFile(instructionsPath, "You are the required reviewer role.\n", "utf8");
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const result = await execute({
+        runId: "run-required-instructions-ok",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          instructionsFilePath: instructionsPath,
+          requireInstructionsFile: true,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.prompt).toContain("You are the required reviewer role.");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps warning and running when missing instructions are not required", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-optional-instructions-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+    const logs: LogEntry[] = [];
+
+    try {
+      const result = await execute({
+        runId: "run-optional-instructions",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          instructionsFilePath: path.join(root, "missing-AGENTS.md"),
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+          },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          stream: "stdout",
+          chunk: expect.stringContaining("Warning: could not read agent instructions file"),
+        }),
+      );
+      await expect(fs.access(capturePath)).resolves.toBeUndefined();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("logs HOME and the resolved executable path in invocation metadata", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-meta-"));
     const workspace = path.join(root, "workspace");
